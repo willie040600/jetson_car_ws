@@ -90,9 +90,7 @@ ADDR_R = 0x02
 # 0x06 的回應是原封包回音 8 bytes；0x03 讀 2 個暫存器是 9 bytes
 WRITE_REPLY_LEN = 8
 READ_REPLY_LEN = 9
-REPLY_TIMEOUT = 0.03
-# Modbus RTU 幀間靜默：38400bps 下 3.5 字元約 0.9ms，取 2ms 保守值
-SILENT_INTERVAL = 0.002
+REPLY_TIMEOUT = 0.05
 
 
 class ZLAC706DiffDrive(Node):
@@ -105,7 +103,8 @@ class ZLAC706DiffDrive(Node):
         self.declare_parameter('wheel_radius', 0.0508)   # 公尺
         self.declare_parameter('wheel_separation', 0.23) # 公尺，左右輪中心距
         self.declare_parameter('max_rpm', 200.0)
-        self.declare_parameter('publish_rate_hz', 10.0)
+        # 驅動器實測需要每幀間隔 >=30ms 才會回應，再加上回應延遲，50ms 一筆交易才穩
+        self.declare_parameter('transaction_period', 0.05)
         self.declare_parameter('invert_left', False)
         self.declare_parameter('invert_right', True)  # 左右輪馬達通常反向安裝
         self.declare_parameter('cmd_timeout', 0.5)
@@ -139,66 +138,57 @@ class ZLAC706DiffDrive(Node):
         self.theta = 0.0
         self.last_time = self.get_clock().now()
 
-        # 序列埠只由 control_cb 這一條路徑存取，cmd_vel 僅更新目標值，避免搶匯流排
+        # 序列埠只由 step_cb 這一條路徑存取，cmd_vel 僅更新目標值，避免搶匯流排
         self.target_rpm_l = 0.0
         self.target_rpm_r = 0.0
+        self.fb_rpm_l = None
+        self.fb_rpm_r = None
+        self.step = 0
         self.last_cmd_time = time.time()
 
-        period = 1.0 / self.get_parameter('publish_rate_hz').value
-        self.timer = self.create_timer(period, self.control_cb)
+        period = self.get_parameter('transaction_period').value
+        self.timer = self.create_timer(period, self.step_cb)
 
     # ----------------------------------------------------------------
     def _transact(self, request: bytes, expect_len: int) -> bytes:
-        """送出一筆 Modbus RTU 請求並收完整個回應，結束後保留幀間靜默。"""
+        """送出一筆 Modbus RTU 請求並收完整個回應；幀間間隔由 timer 週期提供。"""
         self.ser.reset_input_buffer()
         self.ser.write(request)
         self.ser.flush()
-        data = self.ser.read(expect_len)
-        time.sleep(SILENT_INTERVAL)
-        return data
+        return self.ser.read(expect_len)
 
     def _enable_driver(self):
         if self.ser is None:
             return
         self._transact(ENABLE_L, WRITE_REPLY_LEN)
+        time.sleep(0.04)
         self._transact(ENABLE_R, WRITE_REPLY_LEN)
+        time.sleep(0.04)
 
-    def _write_wheel_rpm(self, left_rpm: float, right_rpm: float):
+    def _write_wheel(self, addr: int, rpm: float, invert: bool):
         if self.ser is None:
             return
-        left_rpm = max(-self.max_rpm, min(self.max_rpm, left_rpm))
-        right_rpm = max(-self.max_rpm, min(self.max_rpm, right_rpm))
-
-        if self.invert_left:
-            left_rpm = -left_rpm
-        if self.invert_right:
-            right_rpm = -right_rpm
-
+        rpm = max(-self.max_rpm, min(self.max_rpm, rpm))
+        if invert:
+            rpm = -rpm
         try:
-            self._transact(build_speed_cmd(ADDR_L, left_rpm), WRITE_REPLY_LEN)
-            self._transact(build_speed_cmd(ADDR_R, right_rpm), WRITE_REPLY_LEN)
+            self._transact(build_speed_cmd(addr, rpm), WRITE_REPLY_LEN)
         except Exception as e:
             self.get_logger().warn(f'寫入速度命令失敗: {e}')
 
-    def _read_wheel_rpm(self):
+    def _read_wheel(self, addr: int, invert: bool):
         if self.ser is None:
             return None
         try:
-            data_l = self._transact(read_strpm_cmd(ADDR_L), READ_REPLY_LEN)
-            data_r = self._transact(read_strpm_cmd(ADDR_R), READ_REPLY_LEN)
-
-            _, raw_l = parse_speed_reply(data_l, ADDR_L)
-            _, raw_r = parse_speed_reply(data_r, ADDR_R)
-            if raw_r is None or raw_l is None:
+            data = self._transact(read_strpm_cmd(addr), READ_REPLY_LEN)
+            _, raw = parse_speed_reply(data, addr)
+            if raw is None:
+                self.get_logger().warn(
+                    f'讀取轉速回授失敗 addr=0x{addr:02X} raw={data.hex(" ").upper()}',
+                    throttle_duration_sec=2.0)
                 return None
-
-            rpm_l = rpm_from_raw(raw_l)
-            rpm_r = rpm_from_raw(raw_r)
-            if self.invert_left:
-                rpm_l = -rpm_l
-            if self.invert_right:
-                rpm_r = -rpm_r
-            return rpm_l, rpm_r
+            rpm = rpm_from_raw(raw)
+            return -rpm if invert else rpm
         except Exception as e:
             self.get_logger().warn(f'讀取轉速回授失敗: {e}')
             return None
@@ -218,24 +208,31 @@ class ZLAC706DiffDrive(Node):
         self.target_rpm_r = (v_right / (2 * math.pi * self.wheel_radius)) * 60.0
 
     # ----------------------------------------------------------------
-    def control_cb(self):
-        if time.time() - self.last_cmd_time > self.cmd_timeout:
-            self.target_rpm_l = 0.0
-            self.target_rpm_r = 0.0
+    def step_cb(self):
+        """一個 tick 只做一筆交易，timer 週期就是驅動器需要的幀間間隔。"""
+        if self.step == 0:
+            if time.time() - self.last_cmd_time > self.cmd_timeout:
+                self.target_rpm_l = 0.0
+                self.target_rpm_r = 0.0
+            self._write_wheel(ADDR_L, self.target_rpm_l, self.invert_left)
+        elif self.step == 1:
+            self._write_wheel(ADDR_R, self.target_rpm_r, self.invert_right)
+        elif self.step == 2:
+            self.fb_rpm_l = self._read_wheel(ADDR_L, self.invert_left)
+        else:
+            self.fb_rpm_r = self._read_wheel(ADDR_R, self.invert_right)
+            self._update_odom()
+        self.step = (self.step + 1) % 4
 
-        self._write_wheel_rpm(self.target_rpm_l, self.target_rpm_r)
-        self._update_odom(self._read_wheel_rpm())
-
-    def _update_odom(self, fb):
+    def _update_odom(self):
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds / 1e9
         self.last_time = now
-        if fb is None or dt <= 0.0:
+        if self.fb_rpm_l is None or self.fb_rpm_r is None or dt <= 0.0:
             return
 
-        rpm_left, rpm_right = fb
-        v_left = (rpm_left / 60.0) * 2 * math.pi * self.wheel_radius
-        v_right = (rpm_right / 60.0) * 2 * math.pi * self.wheel_radius
+        v_left = (self.fb_rpm_l / 60.0) * 2 * math.pi * self.wheel_radius
+        v_right = (self.fb_rpm_r / 60.0) * 2 * math.pi * self.wheel_radius
 
         v = (v_left + v_right) / 2.0
         w = (v_right - v_left) / self.wheel_sep
@@ -275,7 +272,9 @@ class ZLAC706DiffDrive(Node):
 
     def destroy_node(self):
         try:
-            self._write_wheel_rpm(0.0, 0.0)
+            self._write_wheel(ADDR_L, 0.0, self.invert_left)
+            time.sleep(0.04)
+            self._write_wheel(ADDR_R, 0.0, self.invert_right)
             if self.ser is not None:
                 self.ser.close()
         except Exception:
