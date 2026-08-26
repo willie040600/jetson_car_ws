@@ -65,20 +65,6 @@ def read_strpm_cmd(addr: int) -> bytes:
     return append_crc(payload)
 
 
-def read_reply(ser: serial.Serial, expect_len=9, wait_s=0.08) -> bytes:
-    """稍微等一下把完整封包讀回（避免 read(n) 太早）。"""
-    deadline = time.time() + wait_s
-    buf = bytearray()
-    while time.time() < deadline:
-        n = ser.in_waiting
-        if n:
-            buf += ser.read(n)
-            if len(buf) >= expect_len:
-                break
-        time.sleep(0.002)
-    return bytes(buf)
-
-
 def parse_speed_reply(data: bytes, expect_addr: int):
     """回傳 (state:int, speed_raw:int16)；格式不對回傳 (None, None)"""
     if len(data) >= 9 and data[0] == expect_addr and data[1] == 0x03 and data[2] == 0x04:
@@ -100,6 +86,13 @@ ENABLE_R = bytes([0x02, 0x06, 0x00, 0x10, 0x00, 0x1F, 0xC9, 0xF4])
 
 ADDR_L = 0x01
 ADDR_R = 0x02
+
+# 0x06 的回應是原封包回音 8 bytes；0x03 讀 2 個暫存器是 9 bytes
+WRITE_REPLY_LEN = 8
+READ_REPLY_LEN = 9
+REPLY_TIMEOUT = 0.03
+# Modbus RTU 幀間靜默：38400bps 下 3.5 字元約 0.9ms，取 2ms 保守值
+SILENT_INTERVAL = 0.002
 
 
 class ZLAC706DiffDrive(Node):
@@ -128,7 +121,7 @@ class ZLAC706DiffDrive(Node):
 
         # ---- 序列埠連線 ----
         try:
-            self.ser = serial.Serial(port, baud, timeout=0.1)
+            self.ser = serial.Serial(port, baud, timeout=REPLY_TIMEOUT)
             self.get_logger().info(f'序列埠已開啟: {port} @ {baud}bps')
             self._enable_driver()
         except Exception as e:
@@ -146,26 +139,29 @@ class ZLAC706DiffDrive(Node):
         self.theta = 0.0
         self.last_time = self.get_clock().now()
 
-        period = 1.0 / self.get_parameter('publish_rate_hz').value
-        self.timer = self.create_timer(period, self.update_odom_cb)
-
+        # 序列埠只由 control_cb 這一條路徑存取，cmd_vel 僅更新目標值，避免搶匯流排
+        self.target_rpm_l = 0.0
+        self.target_rpm_r = 0.0
         self.last_cmd_time = time.time()
-        self.watchdog_timer = self.create_timer(0.1, self.watchdog_cb)
+
+        period = 1.0 / self.get_parameter('publish_rate_hz').value
+        self.timer = self.create_timer(period, self.control_cb)
 
     # ----------------------------------------------------------------
+    def _transact(self, request: bytes, expect_len: int) -> bytes:
+        """送出一筆 Modbus RTU 請求並收完整個回應，結束後保留幀間靜默。"""
+        self.ser.reset_input_buffer()
+        self.ser.write(request)
+        self.ser.flush()
+        data = self.ser.read(expect_len)
+        time.sleep(SILENT_INTERVAL)
+        return data
+
     def _enable_driver(self):
         if self.ser is None:
             return
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-        self.ser.write(ENABLE_L)
-        read_reply(self.ser)
-        time.sleep(0.04)
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-        self.ser.write(ENABLE_R)
-        read_reply(self.ser)
-        time.sleep(0.04)
+        self._transact(ENABLE_L, WRITE_REPLY_LEN)
+        self._transact(ENABLE_R, WRITE_REPLY_LEN)
 
     def _write_wheel_rpm(self, left_rpm: float, right_rpm: float):
         if self.ser is None:
@@ -178,35 +174,21 @@ class ZLAC706DiffDrive(Node):
         if self.invert_right:
             right_rpm = -right_rpm
 
-        cmd_l = build_speed_cmd(ADDR_L, left_rpm)
-        cmd_r = build_speed_cmd(ADDR_R, right_rpm)
-
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-        self.ser.write(cmd_l)
-        read_reply(self.ser)
-        time.sleep(0.02)
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-        self.ser.write(cmd_r)
-        read_reply(self.ser)
+        try:
+            self._transact(build_speed_cmd(ADDR_L, left_rpm), WRITE_REPLY_LEN)
+            self._transact(build_speed_cmd(ADDR_R, right_rpm), WRITE_REPLY_LEN)
+        except Exception as e:
+            self.get_logger().warn(f'寫入速度命令失敗: {e}')
 
     def _read_wheel_rpm(self):
         if self.ser is None:
             return None
         try:
-            self.ser.reset_input_buffer()
-            self.ser.reset_output_buffer()
-            self.ser.write(read_strpm_cmd(ADDR_R))
-            data_r = read_reply(self.ser)
-            time.sleep(0.02)
-            self.ser.reset_input_buffer()
-            self.ser.reset_output_buffer()
-            self.ser.write(read_strpm_cmd(ADDR_L))
-            data_l = read_reply(self.ser)
+            data_l = self._transact(read_strpm_cmd(ADDR_L), READ_REPLY_LEN)
+            data_r = self._transact(read_strpm_cmd(ADDR_R), READ_REPLY_LEN)
 
-            _, raw_r = parse_speed_reply(data_r, ADDR_R)
             _, raw_l = parse_speed_reply(data_l, ADDR_L)
+            _, raw_r = parse_speed_reply(data_r, ADDR_R)
             if raw_r is None or raw_l is None:
                 return None
 
@@ -232,18 +214,19 @@ class ZLAC706DiffDrive(Node):
         v_left = v - (w * self.wheel_sep / 2.0)
         v_right = v + (w * self.wheel_sep / 2.0)
 
-        rpm_left = (v_left / (2 * math.pi * self.wheel_radius)) * 60.0
-        rpm_right = (v_right / (2 * math.pi * self.wheel_radius)) * 60.0
-
-        self._write_wheel_rpm(rpm_left, rpm_right)
-
-    def watchdog_cb(self):
-        if time.time() - self.last_cmd_time > self.cmd_timeout:
-            self._write_wheel_rpm(0.0, 0.0)
+        self.target_rpm_l = (v_left / (2 * math.pi * self.wheel_radius)) * 60.0
+        self.target_rpm_r = (v_right / (2 * math.pi * self.wheel_radius)) * 60.0
 
     # ----------------------------------------------------------------
-    def update_odom_cb(self):
-        fb = self._read_wheel_rpm()
+    def control_cb(self):
+        if time.time() - self.last_cmd_time > self.cmd_timeout:
+            self.target_rpm_l = 0.0
+            self.target_rpm_r = 0.0
+
+        self._write_wheel_rpm(self.target_rpm_l, self.target_rpm_r)
+        self._update_odom(self._read_wheel_rpm())
+
+    def _update_odom(self, fb):
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds / 1e9
         self.last_time = now
