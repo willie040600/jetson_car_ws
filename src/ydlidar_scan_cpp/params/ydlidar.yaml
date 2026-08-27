@@ -1,0 +1,24 @@
+ydlidar_scan_node:
+  ros__parameters:
+    port: /dev/ttyUSB1        # 光達的 CP2102 轉接板；跑過 SDK 的 startup/initenv.sh 後可改用 /dev/ydlidar
+    frame_id: laser_frame
+    ignore_array: ""
+    baudrate: 230400
+    lidar_type: 1             # 0=TOF, 1=TRIANGLE, 2=TOF_NET
+    device_type: 0            # 0=SERIAL, 1=TCP, 2=UDP
+    isSingleChannel: false    # X2/X3 等單通道機種要改 true (baudrate 115200)
+    intensity: true           # G2/G2B 有強度資訊
+    intensity_bit: 8          # G2B 實測需固定 8，設 0 讓 SDK 自動判斷會在切換時解析越界而 crash
+    sample_rate: 9            # 實測 5 會造成封包校驗失敗
+    abnormal_check_count: 4
+    fixed_resolution: true
+    reversion: false
+    inverted: false
+    auto_reconnect: true
+    support_motor_dtr: false
+    angle_min: -180.0
+    angle_max: 180.0
+    range_min: 0.12
+    range_max: 16.0
+    frequency: 10.0
+    invalid_range_is_inf: false

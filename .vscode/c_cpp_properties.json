@@ -4,7 +4,9 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "/opt/ros/humble/include/**"
+                "/opt/ros/humble/include/**",
+                "${workspaceFolder}/build/ydlidar_sdk",
+                "${workspaceFolder}/install/ydlidar_sdk/include/src"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
