@@ -262,8 +262,8 @@ public:
     max_rpm_ = declare_parameter<double>("max_rpm", 200.0);
     // 驅動器需要幀間 >=30ms，再加上回應延遲，50ms 一筆交易才穩
     const auto transaction_period = declare_parameter<double>("transaction_period", 0.05);
-    invert_left_ = declare_parameter<bool>("invert_left", false);
-    invert_right_ = declare_parameter<bool>("invert_right", true);
+    invert_left_ = declare_parameter<bool>("invert_left", true);
+    invert_right_ = declare_parameter<bool>("invert_right", false);
     cmd_timeout_ = declare_parameter<double>("cmd_timeout", 0.5);
     const auto reply_timeout = declare_parameter<double>("reply_timeout", 0.05);
     debug_serial_ = declare_parameter<bool>("debug_serial", false);
@@ -347,7 +347,7 @@ private:
   {
     last_cmd_time_ = std::chrono::steady_clock::now();
     // 實測前後方向與 /cmd_vel 定義相反，這裡整體翻轉線速度；不動 w 與 invert_left/right
-    const double v = -msg->linear.x;
+    const double v = msg->linear.x;
     const double w = msg->angular.z;
 
     const double v_left = v - (w * wheel_sep_ / 2.0);
