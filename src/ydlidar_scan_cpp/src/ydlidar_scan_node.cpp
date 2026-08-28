@@ -168,8 +168,8 @@ private:
     }
 
     auto msg = std::make_unique<sensor_msgs::msg::LaserScan>();
-    msg->header.stamp.sec = static_cast<int32_t>(scan.stamp / 1000000000ULL);
-    msg->header.stamp.nanosec = static_cast<uint32_t>(scan.stamp % 1000000000ULL);
+    // SDK 的 scan.stamp 與 ROS 時鐘不同源，會讓 tf2 查不到對應時刻的 odom；改用掃描起始的 ROS 時間。
+    msg->header.stamp = now() - rclcpp::Duration::from_seconds(scan.config.scan_time);
     msg->header.frame_id = frame_id_;
     msg->angle_min = scan.config.min_angle;
     msg->angle_max = scan.config.max_angle;

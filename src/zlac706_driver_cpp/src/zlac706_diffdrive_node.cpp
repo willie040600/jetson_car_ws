@@ -1,7 +1,7 @@
 // ZLAC706-RC 差速輪 ROS 2 節點 (rclcpp)
 //
 // Modbus RTU 手動組封包 + CRC16，協定對應已驗證可動的測試腳本：
-//   - 左輪 slave address = 0x01, 右輪 slave address = 0x02
+//   - 實接線：左輪 slave address = 0x02, 右輪 slave address = 0x01
 //   - 寫入速度命令：暫存器 0x0011 (function code 0x06)
 //   - 讀取狀態+速度：暫存器 0x00D2, 長度 2 (function code 0x03)
 //   - 使能指令：對 0x0010 寫入固定值（每輪各自的 CRC 已內嵌）
@@ -36,16 +36,17 @@
 namespace
 {
 
-constexpr uint8_t ADDR_L = 0x01;
-constexpr uint8_t ADDR_R = 0x02;
+// 實測左右輪接在與直覺相反的 slave address，接反時只有轉向會錯、直行看不出來。
+constexpr uint8_t ADDR_L = 0x02;
+constexpr uint8_t ADDR_R = 0x01;
 
 // 驅動器實測需要每幀間隔 >=30ms 才會回應，間隔由 timer 週期提供，不在 callback 內 sleep。
 constexpr size_t WRITE_REPLY_LEN = 8;
 constexpr size_t READ_REPLY_LEN = 9;
 
-// 使能命令（沿用已驗證可動的固定 bytes，內含各自的 CRC）
-const std::vector<uint8_t> ENABLE_L{0x01, 0x06, 0x00, 0x10, 0x00, 0x1F, 0xC9, 0xC7};
-const std::vector<uint8_t> ENABLE_R{0x02, 0x06, 0x00, 0x10, 0x00, 0x1F, 0xC9, 0xF4};
+// 使能命令（沿用已驗證可動的固定 bytes，內含各自的 CRC）——依 address 命名，與左右無關
+const std::vector<uint8_t> ENABLE_ADDR_01{0x01, 0x06, 0x00, 0x10, 0x00, 0x1F, 0xC9, 0xC7};
+const std::vector<uint8_t> ENABLE_ADDR_02{0x02, 0x06, 0x00, 0x10, 0x00, 0x1F, 0xC9, 0xF4};
 
 uint16_t modbusCrc(const std::vector<uint8_t> & data)
 {
@@ -261,9 +262,9 @@ public:
     wheel_sep_ = declare_parameter<double>("wheel_separation", 0.23);
     max_rpm_ = declare_parameter<double>("max_rpm", 200.0);
     // 驅動器需要幀間 >=30ms，再加上回應延遲，50ms 一筆交易才穩
-    const auto transaction_period = declare_parameter<double>("transaction_period", 0.05);
-    invert_left_ = declare_parameter<bool>("invert_left", true);
-    invert_right_ = declare_parameter<bool>("invert_right", false);
+    const auto transaction_period = declare_parameter<double>("transaction_period", 0.03);
+    invert_left_ = declare_parameter<bool>("invert_left", false);
+    invert_right_ = declare_parameter<bool>("invert_right", true);
     cmd_timeout_ = declare_parameter<double>("cmd_timeout", 0.5);
     const auto reply_timeout = declare_parameter<double>("reply_timeout", 0.05);
     debug_serial_ = declare_parameter<bool>("debug_serial", false);
@@ -301,9 +302,9 @@ public:
 private:
   void enableDriver()
   {
-    serial_.transact(ENABLE_L, ADDR_L, 0x06, WRITE_REPLY_LEN);
+    serial_.transact(ENABLE_ADDR_01, 0x01, 0x06, WRITE_REPLY_LEN);
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    serial_.transact(ENABLE_R, ADDR_R, 0x06, WRITE_REPLY_LEN);
+    serial_.transact(ENABLE_ADDR_02, 0x02, 0x06, WRITE_REPLY_LEN);
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
   }
 
@@ -346,7 +347,6 @@ private:
   void cmdVelCb(const geometry_msgs::msg::Twist::SharedPtr msg)
   {
     last_cmd_time_ = std::chrono::steady_clock::now();
-    // 實測前後方向與 /cmd_vel 定義相反，這裡整體翻轉線速度；不動 w 與 invert_left/right
     const double v = msg->linear.x;
     const double w = msg->angular.z;
 
@@ -380,9 +380,10 @@ private:
         break;
       default:
         fb_rpm_r_ = readWheel(ADDR_R, invert_right_);
-        updateOdom();
         break;
     }
+    // 每個 tick 都積分，TF 才有 20Hz；只在第 4 步發會掉到 5Hz，SLAM 會查不到 odom。
+    updateOdom();
     step_ = (step_ + 1) % 4;
   }
 
@@ -391,14 +392,19 @@ private:
     const rclcpp::Time stamp = now();
     const double dt = (stamp - last_time_).seconds();
     last_time_ = stamp;
-    if (!fb_rpm_l_ || !fb_rpm_r_ || dt <= 0.0) {
+    if (dt <= 0.0) {
       return;
     }
 
-    const double v_left = (*fb_rpm_l_ / 60.0) * 2.0 * M_PI * wheel_radius_;
-    const double v_right = (*fb_rpm_r_ / 60.0) * 2.0 * M_PI * wheel_radius_;
-    const double v = (v_left + v_right) / 2.0;
-    const double w = (v_right - v_left) / wheel_sep_;
+    // 回授缺任一輪就當靜止，但仍要發 TF，否則 odom->base_link 斷掉會讓 SLAM/Nav2 全掛。
+    double v = 0.0;
+    double w = 0.0;
+    if (fb_rpm_l_ && fb_rpm_r_) {
+      const double v_left = (*fb_rpm_l_ / 60.0) * 2.0 * M_PI * wheel_radius_;
+      const double v_right = (*fb_rpm_r_ / 60.0) * 2.0 * M_PI * wheel_radius_;
+      v = (v_left + v_right) / 2.0;
+      w = (v_right - v_left) / wheel_sep_;
+    }
 
     x_ += v * std::cos(theta_) * dt;
     y_ += v * std::sin(theta_) * dt;

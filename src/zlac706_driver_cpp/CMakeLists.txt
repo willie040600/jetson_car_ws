@@ -30,7 +30,7 @@ install(TARGETS zlac706_diffdrive_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch
+install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
 
