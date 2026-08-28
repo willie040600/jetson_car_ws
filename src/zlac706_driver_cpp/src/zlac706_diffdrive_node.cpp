@@ -256,13 +256,13 @@ public:
   Zlac706DiffDrive()
   : Node("zlac706_diffdrive_node")
   {
-    const auto port = declare_parameter<std::string>("port", "/dev/ttyUSB0");
+    const auto port = declare_parameter<std::string>("port", "/dev/ttyUSB1");
     const int baud = static_cast<int>(declare_parameter<int64_t>("baudrate", 38400));
     wheel_radius_ = declare_parameter<double>("wheel_radius", 0.0508);
     wheel_sep_ = declare_parameter<double>("wheel_separation", 0.23);
     max_rpm_ = declare_parameter<double>("max_rpm", 200.0);
-    // 驅動器需要幀間 >=30ms，再加上回應延遲，50ms 一筆交易才穩
-    const auto transaction_period = declare_parameter<double>("transaction_period", 0.03);
+    // 驅動器需要幀間空檔 >=30ms，交易本身要 8~20ms，週期低於 50ms 時 addr 0x01 會完全不回應
+    const auto transaction_period = declare_parameter<double>("transaction_period", 0.05);
     invert_left_ = declare_parameter<bool>("invert_left", false);
     invert_right_ = declare_parameter<bool>("invert_right", true);
     cmd_timeout_ = declare_parameter<double>("cmd_timeout", 0.5);

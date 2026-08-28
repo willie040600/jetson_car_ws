@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>car_bringup</name>
+  <version>0.0.0</version>
+  <description>整車啟動：ZLAC706 差速輪驅動 + YDLidar + base_link->laser_frame TF</description>
+  <maintainer email="leo@todo.todo">leo</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>zlac706_driver_cpp</exec_depend>
+  <exec_depend>ydlidar_scan_cpp</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
