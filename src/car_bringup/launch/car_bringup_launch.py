@@ -16,8 +16,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         # ttyUSB 編號會隨插拔順序翻轉，接反時兩顆都是「開得起來但不回話」
-        DeclareLaunchArgument('motor_port', default_value='/dev/ttyUSB1'),
-        DeclareLaunchArgument('lidar_port', default_value='/dev/ttyUSB0'),
+        DeclareLaunchArgument('motor_port', default_value='/dev/ttyUSB0'),
+        DeclareLaunchArgument('lidar_port', default_value='/dev/ttyUSB1'),
 
         Node(
             package='zlac706_driver_cpp',
