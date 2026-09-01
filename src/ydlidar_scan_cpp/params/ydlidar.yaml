@@ -2,7 +2,7 @@ ydlidar_scan_node:
   ros__parameters:
     port: /dev/ttyUSB0        # 光達的 CP2102 轉接板；跑過 SDK 的 startup/initenv.sh 後可改用 /dev/ydlidar
     frame_id: laser_frame
-    ignore_array: ""
+    ignore_array: "-85,85"
     baudrate: 230400
     lidar_type: 1             # 0=TOF, 1=TRIANGLE, 2=TOF_NET
     device_type: 0            # 0=SERIAL, 1=TCP, 2=UDP
