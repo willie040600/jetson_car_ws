@@ -267,7 +267,7 @@ public:
     const auto port = declare_parameter<std::string>("port", "/dev/ttyUSB1");
     const int baud = static_cast<int>(declare_parameter<int64_t>("baudrate", 38400));
     wheel_radius_ = declare_parameter<double>("wheel_radius", 0.05368);//原本實際0.508
-    wheel_sep_ = declare_parameter<double>("wheel_separation", 0.2826);//原本實際0.23
+    wheel_sep_ = declare_parameter<double>("wheel_separation", 0.270);//原本實際0.23
     max_rpm_ = declare_parameter<double>("max_rpm", 200.0);
     // 驅動器需要幀間空檔 >=30ms，交易本身要 8~20ms，週期低於 50ms 時 addr 0x01 會完全不回應
     const auto transaction_period = declare_parameter<double>("transaction_period", 0.05);
